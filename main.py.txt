@@ -1,28 +1,34 @@
-rom fastapi import FastAPI
+from fastapi import FastAPI
 from pydantic import BaseModel
+from typing import Optional
+from PIL import Image, ImageDraw
+
 import cadquery as cq
 import base64
 import tempfile
 import os
+import io
+
 
 # Initialize the web server
 app = FastAPI(title="Text-to-CAD Geometry Engine")
 
-# Define the expected JSON structure coming from Google Apps Script
-class BracketParams(BaseModel):
-    length: float
-    height: float
-    width: float
-    thickness: float
-    hole_dia: float
 
-@app.post("/generate-bracket")
-def generate_bracket_api(params: BracketParams):
+# Define the expected JSON structure
+class BracketParams(BaseModel):
+    length: float = 50
+    height: float = 50
+    width: float = 30
+    thickness: float = 3
+    hole_dia: float = 5
+    template_name: Optional[str] = "L-Bracket"
+
+
+def create_bracket(params: BracketParams):
     """
-    Receives JSON parameters from Google Apps Script, generates the CadQuery 
-    geometry, and returns Base64 encoded STEP and STL files.
+    Creates the actual CadQuery L-bracket geometry.
     """
-    # 1. GENERATE THE GEOMETRY
+
     pts = [
         (0, 0),
         (params.length, 0),
@@ -38,55 +44,271 @@ def generate_bracket_api(params: BracketParams):
         .close()
         .extrude(params.width)
     )
-    bracket = bracket.edges("|Z").fillet(1.5)
 
-    bracket = (
-        bracket
-        .faces("<Y").workplane(centerOption="CenterOfMass")
-        .center(params.length/4, 0).hole(params.hole_dia)
-    )
-    bracket = (
-        bracket
-        .faces("<X").workplane(centerOption="CenterOfMass")
-        .center(params.height/4, 0).hole(params.hole_dia)
+    # Add fillets when dimensions safely allow it
+    fillet_radius = min(
+        1.5,
+        params.thickness / 3
     )
 
-    # 2. EXPORT TO TEMPORARY FILES
-    # CadQuery requires exporting to a physical file path, so we use temporary 
-    # files that will be deleted immediately after we encode them.
-    with tempfile.NamedTemporaryFile(suffix=".step", delete=False) as step_file, \
-         tempfile.NamedTemporaryFile(suffix=".stl", delete=False) as stl_file:
-        
-        step_path = step_file.name
-        stl_path = stl_file.name
+    if fillet_radius > 0:
+        bracket = bracket.edges("|Z").fillet(fillet_radius)
 
-    cq.exporters.export(bracket, step_path)
-    cq.exporters.export(bracket, stl_path)
+    # Hole in horizontal section
+    bracket = (
+        bracket
+        .faces("<Y")
+        .workplane(centerOption="CenterOfMass")
+        .center(params.length / 4, 0)
+        .hole(params.hole_dia)
+    )
 
-    # 3. CONVERT FILES TO BASE64 STRINGS
-    # This is required so we can send binary CAD files over standard HTTP back to Google
-    with open(step_path, "rb") as f:
-        step_b64 = base64.b64encode(f.read()).decode('utf-8')
-        
-    with open(stl_path, "rb") as f:
-        stl_b64 = base64.b64encode(f.read()).decode('utf-8')
+    # Hole in vertical section
+    bracket = (
+        bracket
+        .faces("<X")
+        .workplane(centerOption="CenterOfMass")
+        .center(params.height / 4, 0)
+        .hole(params.hole_dia)
+    )
 
-    # 4. CLEAN UP
-    os.remove(step_path)
-    os.remove(stl_path)
+    return bracket
 
-    # 5. RETURN TO GOOGLE APPS SCRIPT
+
+@app.get("/")
+def health_check():
     return {
         "success": True,
-        "step_base64": step_b64,
-        "stl_base64": stl_b64
+        "service": "Text-to-CAD Geometry Engine",
+        "status": "running"
+    }
+
+
+@app.post("/generate-bracket")
+def generate_bracket_api(params: BracketParams):
+    """
+    Receives bracket dimensions, generates CadQuery geometry,
+    and returns Base64-encoded STEP and STL files.
+    """
+
+    step_path = None
+    stl_path = None
+
+    try:
+        # Generate actual CAD geometry
+        bracket = create_bracket(params)
+
+        # Create temporary STEP and STL files
+        with tempfile.NamedTemporaryFile(
+            suffix=".step",
+            delete=False
+        ) as step_file:
+            step_path = step_file.name
+
+        with tempfile.NamedTemporaryFile(
+            suffix=".stl",
+            delete=False
+        ) as stl_file:
+            stl_path = stl_file.name
+
+        # Export CAD files
+        cq.exporters.export(bracket, step_path)
+        cq.exporters.export(bracket, stl_path)
+
+        # Convert STEP file to Base64
+        with open(step_path, "rb") as f:
+            step_b64 = base64.b64encode(
+                f.read()
+            ).decode("utf-8")
+
+        # Convert STL file to Base64
+        with open(stl_path, "rb") as f:
+            stl_b64 = base64.b64encode(
+                f.read()
+            ).decode("utf-8")
+
+        return {
+            "success": True,
+            "step_base64": step_b64,
+            "stl_base64": stl_b64
+        }
+
+    finally:
+        # Clean up temporary files
+        if step_path and os.path.exists(step_path):
+            os.remove(step_path)
+
+        if stl_path and os.path.exists(stl_path):
+            os.remove(stl_path)
+
+
+def make_preview_thumbnail(params: BracketParams):
+    """
+    Generates a PNG preview thumbnail for the gallery.
+    """
+
+    img = Image.new(
+        "RGB",
+        (420, 280),
+        "#f5f5f5"
+    )
+
+    draw = ImageDraw.Draw(img)
+
+    scale = 3
+    base_x = 90
+    base_y = 205
+
+    length = min(
+        int(params.length * scale),
+        230
+    )
+
+    height = min(
+        int(params.height * scale),
+        160
+    )
+
+    width = min(
+        int(params.width * scale),
+        120
+    )
+
+    thickness = max(
+        int(params.thickness * scale),
+        6
+    )
+
+    hole = max(
+        int(params.hole_dia * scale),
+        10
+    )
+
+    # Horizontal base plate
+    base_plate = [
+        (base_x, base_y),
+        (base_x + length, base_y),
+        (base_x + length + 35, base_y - 25),
+        (base_x + 35, base_y - 25)
+    ]
+
+    # Vertical plate
+    vertical_plate = [
+        (base_x + 35, base_y - 25),
+        (base_x + 35, base_y - 25 - height),
+        (
+            base_x + 35 + width,
+            base_y - 25 - height - 20
+        ),
+        (
+            base_x + 35 + width,
+            base_y - 25 - 20
+        )
+    ]
+
+    # Draw bracket faces
+    draw.polygon(
+        base_plate,
+        fill="#d9d9d9",
+        outline="#222222"
+    )
+
+    draw.polygon(
+        vertical_plate,
+        fill="#bfbfbf",
+        outline="#222222"
+    )
+
+    # Thickness detail
+    draw.line(
+        [
+            (base_x, base_y),
+            (base_x, base_y + thickness)
+        ],
+        fill="#222222",
+        width=2
+    )
+
+    # Horizontal hole
+    hole_x = base_x + length // 2
+    hole_y = base_y - 14
+
+    draw.ellipse(
+        [
+            hole_x - hole // 2,
+            hole_y - hole // 2,
+            hole_x + hole // 2,
+            hole_y + hole // 2
+        ],
+        fill="#f5f5f5",
+        outline="#222222",
+        width=2
+    )
+
+    # Vertical hole
+    vertical_hole_x = base_x + 35 + width // 2
+    vertical_hole_y = base_y - 25 - height // 2
+
+    draw.ellipse(
+        [
+            vertical_hole_x - hole // 2,
+            vertical_hole_y - hole // 2,
+            vertical_hole_x + hole // 2,
+            vertical_hole_y + hole // 2
+        ],
+        fill="#f5f5f5",
+        outline="#222222",
+        width=2
+    )
+
+    # Template title
+    title = params.template_name or "L-Bracket"
+
+    draw.text(
+        (16, 14),
+        title,
+        fill="#111111"
+    )
+
+    # Dimension label
+    dimensions = (
+        f"L {params.length} mm | "
+        f"H {params.height} mm | "
+        f"W {params.width} mm | "
+        f"T {params.thickness} mm | "
+        f"Hole {params.hole_dia} mm"
+    )
+
+    draw.text(
+        (16, 34),
+        dimensions,
+        fill="#333333"
+    )
+
+    # Convert PNG to Base64
+    buffer = io.BytesIO()
+
+    img.save(
+        buffer,
+        format="PNG",
+        optimize=True
+    )
+
+    return base64.b64encode(
+        buffer.getvalue()
+    ).decode("utf-8")
+
+
 @app.post("/preview-bracket")
 def preview_bracket(params: BracketParams):
+    """
+    Generates a gallery thumbnail from bracket dimensions.
+    """
+
     thumbnail_base64 = make_preview_thumbnail(params)
 
     return {
         "success": True,
         "thumbnail_base64": thumbnail_base64,
-        "params": params.dict()
-    
-}
+        "params": params.model_dump()
+    }
