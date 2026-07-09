@@ -1,0 +1,83 @@
+from fastapi import FastAPI
+from pydantic import BaseModel
+import cadquery as cq
+import base64
+import tempfile
+import os
+
+# Initialize the web server
+app = FastAPI(title="Text-to-CAD Geometry Engine")
+
+# Define the expected JSON structure coming from Google Apps Script
+class BracketParams(BaseModel):
+    length: float
+    height: float
+    width: float
+    thickness: float
+    hole_dia: float
+
+@app.post("/generate-bracket")
+def generate_bracket_api(params: BracketParams):
+    """
+    Receives JSON parameters from Google Apps Script, generates the CadQuery 
+    geometry, and returns Base64 encoded STEP and STL files.
+    """
+    # 1. GENERATE THE GEOMETRY
+    pts = [
+        (0, 0),
+        (params.length, 0),
+        (params.length, params.thickness),
+        (params.thickness, params.thickness),
+        (params.thickness, params.height),
+        (0, params.height)
+    ]
+
+    bracket = (
+        cq.Workplane("front")
+        .polyline(pts)
+        .close()
+        .extrude(params.width)
+    )
+    bracket = bracket.edges("|Z").fillet(1.5)
+
+    bracket = (
+        bracket
+        .faces("<Y").workplane(centerOption="CenterOfMass")
+        .center(params.length/4, 0).hole(params.hole_dia)
+    )
+    bracket = (
+        bracket
+        .faces("<X").workplane(centerOption="CenterOfMass")
+        .center(params.height/4, 0).hole(params.hole_dia)
+    )
+
+    # 2. EXPORT TO TEMPORARY FILES
+    # CadQuery requires exporting to a physical file path, so we use temporary 
+    # files that will be deleted immediately after we encode them.
+    with tempfile.NamedTemporaryFile(suffix=".step", delete=False) as step_file, \
+         tempfile.NamedTemporaryFile(suffix=".stl", delete=False) as stl_file:
+        
+        step_path = step_file.name
+        stl_path = stl_file.name
+
+    cq.exporters.export(bracket, step_path)
+    cq.exporters.export(bracket, stl_path)
+
+    # 3. CONVERT FILES TO BASE64 STRINGS
+    # This is required so we can send binary CAD files over standard HTTP back to Google
+    with open(step_path, "rb") as f:
+        step_b64 = base64.b64encode(f.read()).decode('utf-8')
+        
+    with open(stl_path, "rb") as f:
+        stl_b64 = base64.b64encode(f.read()).decode('utf-8')
+
+    # 4. CLEAN UP
+    os.remove(step_path)
+    os.remove(stl_path)
+
+    # 5. RETURN TO GOOGLE APPS SCRIPT
+    return {
+        "success": True,
+        "step_base64": step_b64,
+        "stl_base64": stl_b64
+    }
