@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+rom fastapi import FastAPI
 from pydantic import BaseModel
 import cadquery as cq
 import base64
@@ -80,4 +80,13 @@ def generate_bracket_api(params: BracketParams):
         "success": True,
         "step_base64": step_b64,
         "stl_base64": stl_b64
-    }
+@app.post("/preview-bracket")
+def preview_bracket(params: BracketParams):
+    thumbnail_base64 = make_preview_thumbnail(params)
+
+    return {
+        "success": True,
+        "thumbnail_base64": thumbnail_base64,
+        "params": params.dict()
+    
+}
