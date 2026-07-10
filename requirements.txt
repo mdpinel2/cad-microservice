@@ -1,4 +1,6 @@
+cadquery
 fastapi
 uvicorn
-pydantic
-cadquery
+# Add these for image rendering
+pyrender
+Pillow
